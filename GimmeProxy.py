@@ -313,7 +313,7 @@ class RequestDistributor(object):
         if self.isDeterminate:
             requestCount = self.requestsToProcess.qsize()
 
-        self.initRequestWorkers() #TODO should this be passed in for indeterminate mode?
+        self.initRequestWorkers()
         try:
             while self.getNumberOfRunningWorkers() > 0 or not self.results.empty() :
                 if (self.isDeterminate) and requestCount <= self.resultsProcessed:
