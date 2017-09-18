@@ -21,7 +21,9 @@ class NewProxyRequestDeniedException(Exception):
 
 class Proxy(object):
     httpProxyLocation = None
-    successCount = 0 # + 1 each time it handles all requests correctly, - 1 each time it doesn't handle them all correctly
+    score = 0 # + 1 each time it handles all requests correctly, - 1 each time it doesn't handle them all correctly
+    successfulRequests = 0
+    unsuccessfulRequests = 0
     source = ""
     successCounted = False
     failureCounted = False
@@ -32,12 +34,15 @@ class Proxy(object):
         self.proxySource = source
     
     def regardAsSuccess(self):
-        if self.successCount < 4 and not self.successCounted:
-            self.successCount += 1
+        self.successfulRequests += 1
+        if self.score < 4 and not self.successCounted:
+            self.score += 1
+            
 
     def regardAsFailure(self, failureReason):
+        self.unsuccessfulRequests += 1
         if not self.failureCounted:
-            self.successCount -= 1
+            self.score -= 1
             self.failureReason = failureReason
 
 #The point of this class is to retain and manage the proxies to use, as well as
@@ -68,7 +73,10 @@ class ProxySource(object):
                     if len(row) >= 2:
                         proxy = Proxy(self)
                         proxy.httpProxyLocation = row[0]
-                        proxy.successCount = int(row[1])
+                        proxy.score = int(row[1])
+                        if len(row) > 3:
+                            proxy.successfulRequests = int(row[2])
+                            proxy.unsuccessfulRequests = int(row[3])
                         proxy.source = "Persisted"
                         yield proxy
         except IOError:
@@ -79,14 +87,14 @@ class ProxySource(object):
         with open(self.persistFile, "wb") as csvfile:
             writer = csv.writer(csvfile)
             for proxy in self.proxies:
-                if proxy.successCount >= 0:
-                    writer.writerow([proxy.httpProxyLocation, proxy.successCount])
+                if proxy.score >= 0:
+                    writer.writerow([proxy.httpProxyLocation, proxy.score, proxy.successfulRequests, proxy.unsuccessfulRequests])
         
         with open(self.failedFile, "a") as file:
             writer = csv.writer(file)
             for proxy in self.proxies:
-                if proxy.successCount < 0:
-                    writer.writerow([time.strftime("%d/%m/%Y %I:%M:%S"),proxy.httpProxyLocation,proxy.failureReason])
+                if proxy.score < 0:
+                    writer.writerow([time.strftime("%d/%m/%Y %I:%M:%S"),proxy.httpProxyLocation,proxy.failureReason,proxy.successfulRequests, proxy.unsuccessfulRequests])
 
     def getNewProxy(self):
         try:
@@ -98,7 +106,9 @@ class ProxySource(object):
         response = r.text
         jsonResponse = json.loads(response)
         proxy = Proxy(self)
-        proxy.successCount = 0
+        proxy.score = 0
+        proxy.successfulRequests = 0
+        proxy.unsuccessfulRequests = 0
         proxy.httpProxyLocation = jsonResponse["curl"]
         proxy.source = "GimmeProxy API"
         self.proxiesLoadedThroughAPI += 1 
@@ -128,7 +138,7 @@ class ProxySource(object):
     def reportStatus(self):
         print("Proxy Collection Status Report:")
         for proxy in self.proxies:
-            print("Proxy: " + proxy.httpProxyLocation + " Count: " + str(proxy.successCount) + " Source: " + proxy.source)
+            print("Proxy: " + proxy.httpProxyLocation + " Score: " + str(proxy.score) + " Source: " + proxy.source)
 
 class RequestInfo(object):
     url = ""
@@ -224,7 +234,7 @@ class RequestWorker(threading.Thread):
                     message = str(e.message)[:80]
                 else:
                     message = str(e.message)
-                self.status = "Failed (rank: " + str(self.proxy.successCount) + "): " + message
+                self.status = "Failed (Score: " + str(self.proxy.score) + "): " + message
                 self.requestProducer.reportStatus()
                 self.registerFailure(message)
                 try:
