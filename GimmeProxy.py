@@ -25,14 +25,20 @@ class Proxy(object):
     source = ""
     successCounted = False
     failureCounted = False
+    proxySource = None
+    failureReason = None
+    
+    def __init__(self, source):
+        self.proxySource = source
     
     def regardAsSuccess(self):
-        if self.successCount < 3 and not self.successCounted:
+        if self.successCount < 4 and not self.successCounted:
             self.successCount += 1
 
-    def regardAsFailure(self):
+    def regardAsFailure(self, failureReason):
         if not self.failureCounted:
             self.successCount -= 1
+            self.failureReason = failureReason
 
 #The point of this class is to retain and manage the proxies to use, as well as
 #kind of passively build up a collection of proxies over time.
@@ -40,6 +46,7 @@ class ProxySource(object):
     proxiesToUse = None #Proxies that are ready to be allocated to a proxy slot and used.
     proxies = None
     persistFile = "proxies.txt"
+    failedFile = "failedproxies.txt"
     minSize = -1
     proxiesLoadedThroughAPI = 0
     
@@ -59,7 +66,7 @@ class ProxySource(object):
                 reader = csv.reader(csvfile)
                 for row in reader:
                     if len(row) >= 2:
-                        proxy = Proxy()
+                        proxy = Proxy(self)
                         proxy.httpProxyLocation = row[0]
                         proxy.successCount = int(row[1])
                         proxy.source = "Persisted"
@@ -74,6 +81,12 @@ class ProxySource(object):
             for proxy in self.proxies:
                 if proxy.successCount >= 0:
                     writer.writerow([proxy.httpProxyLocation, proxy.successCount])
+        
+        with open(self.failedFile, "a") as file:
+            writer = csv.writer(file)
+            for proxy in self.proxies:
+                if proxy.successCount < 0:
+                    writer.writerow([time.strftime("%d/%m/%Y %I:%M:%S"),proxy.httpProxyLocation,proxy.failureReason])
 
     def getNewProxy(self):
         try:
@@ -84,7 +97,7 @@ class ProxySource(object):
             raise GimmeProxyAPIException("GimmeProxy communication failed.  Status code: " + str(r.status_code))
         response = r.text
         jsonResponse = json.loads(response)
-        proxy = Proxy()
+        proxy = Proxy(self)
         proxy.successCount = 0
         proxy.httpProxyLocation = jsonResponse["curl"]
         proxy.source = "GimmeProxy API"
@@ -160,9 +173,9 @@ class RequestWorker(threading.Thread):
         self.proxy.regardAsSuccess()
         self.contiguousFailureCount = 0
 
-    def registerFailure(self):
+    def registerFailure(self, message):
         self.contiguousFailureCount += 1
-        self.proxy.regardAsFailure()
+        self.proxy.regardAsFailure(message)
         self.failureCount += 1
 
     def sleepAfterSuccessfulRequest(self, sleeptime):
@@ -213,7 +226,7 @@ class RequestWorker(threading.Thread):
                     message = str(e.message)
                 self.status = "Failed (rank: " + str(self.proxy.successCount) + "): " + message
                 self.requestProducer.reportStatus()
-                self.registerFailure()
+                self.registerFailure(message)
                 try:
                     self.proxy = self.requestProducer.proxySource.dequeueNextProxy()
                 except:
