@@ -1,4 +1,5 @@
 #todo https
+import datetime
 import time
 import random
 import threading
@@ -24,21 +25,21 @@ class Proxy(object):
     score = 0 # + 1 each time it handles all requests correctly, - 1 each time it doesn't handle them all correctly
     successfulRequests = 0
     unsuccessfulRequests = 0
-    source = ""
+    source = "" # Did this come from the API or our persist file?
     successCounted = False
     failureCounted = False
-    proxySource = None
+    proxyManager = None
     failureReason = None
+    chillDate = None
     
     def __init__(self, source):
-        self.proxySource = source
+        self.proxyManager = source
     
     def regardAsSuccess(self):
         self.successfulRequests += 1
         if self.score < 4 and not self.successCounted:
             self.score += 1
             
-
     def regardAsFailure(self, failureReason):
         self.unsuccessfulRequests += 1
         if not self.failureCounted:
@@ -47,21 +48,31 @@ class Proxy(object):
 
 #The point of this class is to retain and manage the proxies to use, as well as
 #kind of passively build up a collection of proxies over time.
-class ProxySource(object):
-    proxiesToUse = None #Proxies that are ready to be allocated to a proxy slot and used.
-    proxies = None
+class ProxyManager(object):
+    proxiesToUse = None    #Proxies that are ready to be allocated to a proxy slot and used.
+    proxiesDiscarded = []  #Proxies that have been allocated and are waiting until they have chilled long enough to be used again.
+    proxies = None         #Combination of the above two collections of proxies-- all proxies this manager knows about,  available or not.
     persistFile = "proxies.txt"
     failedFile = "failedproxies.txt"
     minSize = -1
     proxiesLoadedThroughAPI = 0
+    chillHours = 4 # After a proxy has been used a few times, this is the amount of hours that the manager should wait before using it again.
     
     def __init__(self, persistFile, minSize =  -1):
         self.proxiesToUse = Queue.Queue()
         self.minSize = minSize
         self.proxies = []
         self.persistFile = persistFile
+    
+    def getAvailableProxies():
+        for proxy in self.proxies:
+            if proxy.chillDate is None:
+                yield proxy
+                
+            if proxy.chillDate < datetime.datetime.now():
+                yield proxy
 
-    def enqueueProxy(self, proxy):
+    def enqueueNewProxy(self, proxy):
         self.proxiesToUse.put(proxy)
         self.proxies.append(proxy)
         
@@ -128,12 +139,26 @@ class ProxySource(object):
         
         random.shuffle(proxies)
         for proxy in proxies:
-            self.enqueueProxy(proxy)
-
+            self.enqueueNewProxy(proxy)
+            
+    def checkIfDiscardedProxiesReady(self):
+        for proxy in self.proxiesDiscarded:
+            if proxy.chillDate < datetime.datetime.now():
+                self.chillDate = None
+                self.successCounted = False
+                self.failureCounted = False
+                self.proxiesToUse.put(proxy)
+            
     def dequeueNextProxy(self):
+        self.checkIfDiscardedProxiesReady()
+        
         if self.proxiesToUse.qsize() == 0:
-            self.enqueueProxy(self.getNewProxy())    
-        return self.proxiesToUse.get()
+            self.enqueueNewProxy(self.getNewProxy())    
+            
+        proxy = self.proxiesToUse.get()
+        proxy.chillDate = datetime.datetime.now() + datetime.timedelta(hours=self.chillHours)
+        self.proxiesDiscarded.append(proxy)
+        return proxy
 
     def reportStatus(self):
         print("Proxy Collection Status Report:")
@@ -171,7 +196,7 @@ class RequestWorker(threading.Thread):
         self.name = name
         self.requestProducer = producer
         self.maxRequestsToConsume = maxRequestsToConsume
-        self.proxy = self.requestProducer.proxySource.dequeueNextProxy()
+        self.proxy = self.requestProducer.proxyManager.dequeueNextProxy()
         self.status = ""
         return
     
@@ -238,7 +263,7 @@ class RequestWorker(threading.Thread):
                 self.requestProducer.reportStatus()
                 self.registerFailure(message)
                 try:
-                    self.proxy = self.requestProducer.proxySource.dequeueNextProxy()
+                    self.proxy = self.requestProducer.proxyManager.dequeueNextProxy()
                 except:
                     self.status = "Failed to dequeue a new proxy."
                     self.requestProducer.registerException(NewProxyRequestDeniedException())
@@ -258,7 +283,7 @@ class RequestDistributor(object):
     workers = None
     activeWorkers = None
     numberOfWorkers = 0
-    proxySource = None
+    proxyManager = None
     requestsToProcess = None
     stop = False 
     results = None
@@ -273,8 +298,8 @@ class RequestDistributor(object):
         self.workers = []
         self.activeWorkers = []
         self.numberOfWorkers = numberOfWorkers if numberOfWorkers > 0 else 1     
-        self.proxySource = ProxySource(proxyPersistFile, numberOfWorkers)
-        self.proxySource.initializeProxies()
+        self.proxyManager = ProxyManager(proxyPersistFile, numberOfWorkers)
+        self.proxyManager.initializeProxies()
         self.requestsToProcess = Queue.Queue()
         self.results = Queue.Queue()
         self.workerSleepTime = sleepTimeBetweenRequests
@@ -351,8 +376,8 @@ class RequestDistributor(object):
                     self.activeWorkers.remove(result)
         finally:
             self.stopAllWorkers()
-            self.proxySource.reportStatus()
-            self.proxySource.persistProxies()
+            self.proxyManager.reportStatus()
+            self.proxyManager.persistProxies()
             
             with self.requestsToProcess.mutex:
                 for item in list(self.requestsToProcess.queue):
