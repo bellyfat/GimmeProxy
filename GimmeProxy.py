@@ -104,7 +104,7 @@ class ProxyManager(object):
                 if proxy.score < 0:
                     writer.writerow([time.strftime("%d/%m/%Y %I:%M:%S"),proxy.httpProxyLocation,proxy.failureReason,proxy.successfulRequests, proxy.unsuccessfulRequests])
 
-    def getNewProxy(self):
+    def getNewProxy(self, persist = False):
         try:
             r = requests.get("https://gimmeproxy.com/api/getProxy?post=true&maxCheckPeriod=3600&protocol=http")
         except:
@@ -136,6 +136,7 @@ class ProxyManager(object):
             proxies.append(self.getNewProxy())
         
         random.shuffle(proxies)
+        self.persistProxies()
         for proxy in proxies:
             self.enqueueNewProxy(proxy)
             
@@ -151,7 +152,7 @@ class ProxyManager(object):
         self.checkIfDiscardedProxiesReady()
         
         if self.proxiesToUse.qsize() == 0:
-            self.enqueueNewProxy(self.getNewProxy())    
+            self.enqueueNewProxy(self.getNewProxy(True))    
             
         proxy = self.proxiesToUse.get()
         proxy.chillDate = datetime.datetime.now() + datetime.timedelta(hours=self.chillHours)
@@ -208,6 +209,7 @@ class RequestWorker(threading.Thread):
     def registerFailure(self, message):
         self.contiguousFailureCount += 1
         self.proxy.regardAsFailure(message)
+        self.requestProducer.proxyManager.persistProxies()
         self.failureCount += 1
 
     def sleepAfterSuccessfulRequest(self, sleeptime):
@@ -382,7 +384,7 @@ class RequestDistributor(object):
         finally:
             self.stopAllWorkers()
             self.proxyManager.reportStatus()
-            self.proxyManager.persistProxies()
+            #self.proxyManager.persistProxies()
             
             with self.requestsToProcess.mutex:
                 for item in list(self.requestsToProcess.queue):
