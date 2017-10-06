@@ -8,9 +8,6 @@ import csv
 import Queue
 import json
 
-import requests.packages.urllib3
-requests.packages.urllib3.disable_warnings()
-
 class ExcessiveProxyFailureException(Exception):
     pass
     
@@ -130,6 +127,7 @@ class ProxyManager(object):
         for proxy in self.getSavedProxies():
             proxies.append(proxy)
         while len(proxies) < self.minSize:
+            print("Getting New.")
             proxies.append(self.getNewProxy())
         
         #Passively try to build our collection.  If we haven't hit the API at all, now's a good chance to hit it just twice to build up the collection.
@@ -184,7 +182,6 @@ class RequestWorker(threading.Thread):
     name = None
     requestProducer = None
     maxRequestsToConsume = -1
-    requestsConsumed = 0
     proxy = None
     status = None
     successCount = 0
@@ -222,16 +219,24 @@ class RequestWorker(threading.Thread):
                 time.sleep(1)
                 
     def run(self):
-        while self.maxRequestsToConsume < 0 or self.maxRequestsToConsume > self.requestsConsumed:        
+        while True:        
             if self.contiguousFailureCount > 25:
                 self.status = "Unrecoverable-- This thread has failed too many times in a row.  It is shutting down."
                 self.requestProducer.registerException(ExcessiveProxyFailureException())
                 break
-            
+                        
             if self.maxRequestsToConsume > 0 and self.successCount >= self.maxRequestsToConsume:
-                self.status = "Maximum request processing limit of " + str(self.maxRequestsToConsume) + " reached.  Stopping Thread."
-                break
-                
+                self.status = "Maximum requests consumed for this proxy.  New one retrieved."
+                try:
+                    self.proxy = self.requestProducer.proxyManager.dequeueNextProxy()
+                    self.successCount = 0
+                    self.requestProducer.reportStatus()
+                    continue #give it a chance to see if it should still be running.
+                except:
+                    self.status = "Failed to dequeue a new proxy (max)."
+                    self.requestProducer.registerException(NewProxyRequestDeniedException())
+                    break
+                    
             request = self.requestProducer.requestsToProcess.get()
             if request is None:
                status = "Stopped from external source."
@@ -254,7 +259,7 @@ class RequestWorker(threading.Thread):
                 self.requestProducer.registerResult(request.key, r.text)
                 self.sleepAfterSuccessfulRequest(self.requestProducer.workerSleepTime)
             except Exception as e:
-                self.requestProducer.requestsToProcess.put(request) #put the failed request back into the queue
+                self.requestProducer.requestsToProcess.put(request) # TODO this would be safer if we put it on the front of the queue somehow.
                 if len(str(e.message)) > 80:
                     message = str(e.message)[:80]
                 else:
@@ -265,7 +270,7 @@ class RequestWorker(threading.Thread):
                 try:
                     self.proxy = self.requestProducer.proxyManager.dequeueNextProxy()
                 except:
-                    self.status = "Failed to dequeue a new proxy."
+                    self.status = "Failed to dequeue a new proxy (Error)."
                     self.requestProducer.registerException(NewProxyRequestDeniedException())
         self.requestProducer.registerCompletedWorker(self) # Tells the parent to stop blocking and check to see if it should stop as well.
         
@@ -354,8 +359,8 @@ class RequestDistributor(object):
     def enqueueRequest(self, request):
         self.requestsToProcess.put(request)
 
-    #if allow is false, it will stop processing when it counts all the requests and sees that they have responses.
-    #if allow is true, it will assume that an outside process will set stop=true and keep running until that happens.
+    #if isDeterminate is true, it will stop processing when it counts all the requests and sees that they have responses.
+    #if isDeterminate is false, it will assume that an outside process will set stop=true and keep running until that happens.
     #This can throw ExcessiveProxyFailureException.  Account for this.
     def executeRequests(self):
         if self.isDeterminate:
